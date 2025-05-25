@@ -28,3 +28,7 @@ pip install "unsloth[cu121-torch250] @ git+https://github.com/unslothai/unsloth.
 ```
 ./exec.sh
 ```
+
+## 모델 다운로드
+- [LLM](https://drive.google.com/file/d/1KJ_98uYYLlD3mV31fywGFmtLy14wM84I/view?usp=sharing)
+- [doclayout_yolo_weight](https://drive.google.com/file/d/16joiEYMxGgWWEenur7_YrNe1Fc4EeMCB/view?usp=sharing)
