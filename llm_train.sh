@@ -1,0 +1,13 @@
+python ./utils/train.py --model_name unsloth/Llama-3.2-3B-Instruct \
+    --max_seq_length 2048 \
+    --r 16 \
+    --lora_alpha 16 \
+    --data_path /workspace/paper_translation/paper_translation_data/translation_dataset/ \
+    --per_device_train_batch_size 64 \
+    --gradient_accumulation_steps 1 \
+    --num_train_epochs 1 \
+    --learning_rate 2e-4 \
+    --optim adamw_8bit \
+    --output_dir /workspace/paper_translation/save_model/ \
+    --save_steps 10000 \
+    --logging_steps 1
