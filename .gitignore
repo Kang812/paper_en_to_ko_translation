@@ -1,2 +1,4 @@
 doclayout_yolo_weight/
 save_model/
+*.ipynb
+__pycache__

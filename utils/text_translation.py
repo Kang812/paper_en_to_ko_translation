@@ -22,6 +22,7 @@ from nltk.tokenize import sent_tokenize
 import torch
 from torchvision.ops import nms # NMS를 위해 torchvision.ops 임포
 import nltk # sent_tokenize 사용을 위해 nltk 다운로드 확인 로직 추가
+from ollama import chat
 
 # nltk 'punkt' 리소스 확인 및 다운로드 (sent_tokenize 사용에 필요)
 try:
@@ -38,6 +39,7 @@ def translate_model(model, tokenizer, text, device):
         add_generation_prompt=True,
         return_tensors="pt",
     ).to(device)
+
     outputs = model.generate(
         input_ids=inputs,
         max_new_tokens=128, # 번역 결과 길이에 따라 조절 가능
@@ -55,7 +57,7 @@ def translate_model(model, tokenizer, text, device):
                              .replace("<|eot_id|>", "").strip() # 양 끝 공백 제거 추가
     return translation
 
-def layout_detect(model, image, confidence_threshold=0.2, nms_iou_thresh=0.5):
+def layout_detect(model, image, confidence_threshold=0.2, nms_iou_thresh=0.5, class_agnostic=True):
     """
     레이아웃을 감지하고 NMS를 적용하여 중복 바운딩 박스를 제거합니다.
 
@@ -64,6 +66,8 @@ def layout_detect(model, image, confidence_threshold=0.2, nms_iou_thresh=0.5):
         image: PIL Image 또는 NumPy 배열 형식의 입력 이미지.
         confidence_threshold (float): 객체 감지를 위한 최소 신뢰도.
         nms_iou_thresh (float): NMS를 위한 IoU 임계값. 이 값보다 IoU가 큰 중복 박스가 제거됨.
+        class_agnostic (bool): True일 경우 클래스에 상관없이 NMS를 적용하여 겹치는 박스를 제거함. 
+                               False일 경우 같은 클래스끼리만 NMS 적용.
 
     Returns:
         tuple: (names, pred_bbox, pred_cls, pred_conf)
@@ -94,7 +98,7 @@ def layout_detect(model, image, confidence_threshold=0.2, nms_iou_thresh=0.5):
        boxes_obj.xyxy is None or boxes_obj.conf is None or boxes_obj.cls is None or \
        boxes_obj.xyxy.numel() == 0:
         empty_np_array = np.array([])
-        return names_map, empty_np_array, empty_np_array, empty_np_array
+        return names_map, empty_np_array, empty_np_array
 
     # CPU로 데이터 이동
     xyxy_boxes = boxes_obj.xyxy.cpu()   # 바운딩 박스 [N, 4] (xmin, ymin, xmax, ymax)
@@ -102,29 +106,34 @@ def layout_detect(model, image, confidence_threshold=0.2, nms_iou_thresh=0.5):
     pred_cls_raw = boxes_obj.cls.cpu()  # 클래스 ID [N]
 
     final_indices_to_keep = []
-    unique_classes = torch.unique(pred_cls_raw)
-
-    for cls_id in unique_classes:
-        class_mask = (pred_cls_raw == cls_id)
-        class_boxes_xyxy = xyxy_boxes[class_mask]
-        class_scores = pred_conf[class_mask]
-        
-        # torchvision.ops.nms 적용
-        # nms 함수는 xyxy 형식의 박스와 score를 입력으로 받습니다.
-        keep_for_class = nms(class_boxes_xyxy, class_scores, nms_iou_thresh)
-        
-        # keep_for_class는 class_boxes_xyxy 내의 인덱스입니다.
-        # 원래 전체 박스 리스트에서의 인덱스로 변환합니다.
-        original_indices_for_class = torch.where(class_mask)[0]
-        final_indices_to_keep.extend(original_indices_for_class[keep_for_class].tolist())
+    
+    if class_agnostic:
+        # 클래스 구분 없이 전체 박스에 대해 NMS 수행
+        keep_indices = nms(xyxy_boxes, pred_conf, nms_iou_thresh)
+        final_indices_to_keep = keep_indices.tolist()
+    else:
+        # 기존 로직: 클래스별로 NMS 수행
+        unique_classes = torch.unique(pred_cls_raw)
+        for cls_id in unique_classes:
+            class_mask = (pred_cls_raw == cls_id)
+            class_boxes_xyxy = xyxy_boxes[class_mask]
+            class_scores = pred_conf[class_mask]
+            
+            # torchvision.ops.nms 적용
+            keep_for_class = nms(class_boxes_xyxy, class_scores, nms_iou_thresh)
+            
+            # keep_for_class는 class_boxes_xyxy 내의 인덱스입니다.
+            # 원래 전체 박스 리스트에서의 인덱스로 변환합니다.
+            original_indices_for_class = torch.where(class_mask)[0]
+            final_indices_to_keep.extend(original_indices_for_class[keep_for_class].tolist())
 
     if not final_indices_to_keep:
         empty_np_array = np.array([])
-        return names_map, empty_np_array, empty_np_array, empty_np_array
+        return names_map, empty_np_array, empty_np_array
 
     # 최종 선택된 인덱스를 사용하여 박스, 신뢰도, 클래스 필터링
-    # 중복된 인덱스가 있을 수 있으므로 unique 처리 후 정렬 (선택 사항, nms 결과는 보통 unique)
-    # final_indices_to_keep = sorted(list(set(final_indices_to_keep))) # 필요시
+    # 중복된 인덱스가 있을 수 있으므로 unique 처리 후 정렬 (class_agnostic=True인 경우 nms가 이미 unique한 결과를 주지만, False인 경우 합칠 때 순서 보장을 위해)
+    final_indices_to_keep = sorted(list(set(final_indices_to_keep)))
     final_indices_to_keep_tensor = torch.tensor(final_indices_to_keep, dtype=torch.long)
 
     final_xyxy_boxes = xyxy_boxes[final_indices_to_keep_tensor]
@@ -235,6 +244,7 @@ def fit_text_to_frame(text_content, width, height, canvas_obj, base_style, min_f
 def paper_translation(layout_yolo_ckpt,
                       llm_ckpt, # 이 인자는 FastLanguageModel.from_pretrained에서 model_name으로 사용됩니다.
                       pdf_path,
+                      ollama_mode=False,
                       output_pdf_path="/workspace/paper_translation/output_final.pdf", # 출력 파일명 변경
                       font_path='/workspace/paper_translation/font/NanumGothicBold.ttf'):
     
@@ -246,14 +256,16 @@ def paper_translation(layout_yolo_ckpt,
     dtype = None
     load_in_4bit = True
 
-    ts_model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=llm_ckpt, # llm_ckpt 변수 사용
-        max_seq_length=max_seq_length,
-        dtype=dtype,
-        load_in_4bit=load_in_4bit,
-    )
+    if not ollama_mode:
+        ts_model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=llm_ckpt, # llm_ckpt 변수 사용
+            max_seq_length=max_seq_length,
+            dtype=dtype,
+            load_in_4bit=load_in_4bit,
+        )
 
     print(f"Converting PDF to images: {pdf_path}")
+    
     try:
         images = convert_from_path(pdf_path, dpi=200)
     except Exception as e:
@@ -290,14 +302,25 @@ def paper_translation(layout_yolo_ckpt,
         h_ratio = 1.0
         
         # layout_detect 호출 시 NMS 임계값 조절 가능
+        # layout_detect 호출 시 NMS 임계값 조절 가능
         names_map, pred_bbox, pred_cls = layout_detect(
             layout_detect_model, 
             image, 
             confidence_threshold=0.25, # 약간 상향 조정 (선택 사항)
-            nms_iou_thresh=0.4         # NMS IoU 임계값 낮춰서 중복 제거 강화 (선택 사항)
+            nms_iou_thresh=0.4,        # NMS IoU 임계값 낮춰서 중복 제거 강화 (선택 사항)
+            class_agnostic=True        # Class-Agnostic NMS 활성화
         )
 
-        if pred_bbox.size == 0: # pred_cls.size == 0 조건은 pred_bbox.size == 0 에 포함됨
+        # 1. 페이지 전체 이미지를 배경으로 그리기 (Overlay 방식)
+        # 이미지 객체 생성 (ReportLab에서 사용 가능하도록 변환)
+        # image는 PIL Image 객체임
+        try:
+            full_page_img_reader = ImageReader(image)
+            c.drawImage(full_page_img_reader, 0, 0, width=page_width, height=page_height)
+        except Exception as e:
+            print(f"Error drawing background image for page {i+1}: {e}")
+
+        if pred_bbox.size == 0: 
             print(f"No layout objects detected on page {i+1}.")
             if i < len(images) - 1:
                  c.showPage()
@@ -306,119 +329,91 @@ def paper_translation(layout_yolo_ckpt,
         for j in range(len(pred_bbox)):
             bbox_xywh = pred_bbox[j]  # xywh 형식
             cls_id = int(pred_cls[j]) # 정수형 클래스 ID
-            # cls_name = names_map.get(cls_id, f"Unknown_cls_{cls_id}") # 디버깅용
-
-            # 카테고리 정의 (DocLayNet 기준 예시, 모델에 따라 다를 수 있음)
+            
+            # 카테고리 정의 (DocLayNet 기준)
             # 0: Caption, 1: Footnote, 2: Formula, 3: List-item, 4: Page-footer, 5: Page-header
             # 6: Picture, 7: Section-header, 8: Table, 9: Text, 10: Title
-            # 사용자의 클래스 ID: 번역 [0,3,9], 원본텍스트 [1,4,5,7,10], 그외 이미지
-            # 사용자 정의에 따름:
-            # 번역 대상: 0 (Caption? Text?), 3 (List-item), 9 (Text)
-            # 원본 텍스트 대상: 1 (Footnote), 4 (Page-footer), 5 (Page-header), 7 (Section-header), 10 (Title? Formula?)
-            # 이미지 삽입 대상: 그 외 모든 클래스 (예: 2(Formula), 6(Picture), 8(Table) 등)
+            
+            # 텍스트로 처리할 클래스들 (이미지/표/수식 등을 제외한 대부분의 텍스트)
+            # 기존에는 일부만 번역했으나, 이제 Title(10), Header(5,7), Footer(4), Footnote(1) 등도 포함
+            text_processing_classes = [0, 1, 3, 4, 5, 7, 9, 10]
+            
+            # Title(10)만 중앙 정렬. Section-header(7)는 좌측 정렬이 일반적임.
+            # 사용자가 "부재목이 너무 뒤로가있다"고 한 것은 중앙 정렬로 인한 들여쓰기 현상일 가능성 높음.
+            center_align_classes = [10] 
 
-            text_processing_classes = [0, 3, 9, 1, 4, 5, 7, 10]
-            translation_classes = [0, 3, 9]
-            center_align_classes = [10] # 예: Title 또는 Formula ID (사용자 모델의 class 10이 수식이라면)
+            # 표(8), 그림(6), 수식(2) 등은 배경 이미지에 이미 포함되어 있으므로 별도 처리 안함
+            if cls_id not in text_processing_classes:
+                continue
 
-            if cls_id in text_processing_classes:
-                # === 텍스트 요소 처리 ===
-                text_list, box_coords = image_to_text(image, bbox_xywh) # image는 PIL Image
-                
-                if not text_list:
-                    # print(f"Debug: Page {i+1}, Bbox {j} ({cls_name}): No text extracted. Skipping.")
-                    continue
-                
-                # PDF 프레임 좌표 및 크기 (image_to_text에서 반환된 box_coords 기준)
-                xmin_orig, ymin_orig, xmax_orig, ymax_orig = box_coords
-                frame_width = (xmax_orig - xmin_orig) / w_ratio
-                frame_height = (ymax_orig - ymin_orig) / h_ratio
-                frame_x = xmin_orig / w_ratio
-                frame_y = page_height - (ymax_orig / h_ratio)
+            # === 텍스트 요소 처리 ===
+            text_list, box_coords = image_to_text(image, bbox_xywh) 
+            
+            if not text_list:
+                continue
+            
+            # PDF 프레임 좌표 및 크기
+            xmin_orig, ymin_orig, xmax_orig, ymax_orig = box_coords
+            frame_width = (xmax_orig - xmin_orig) / w_ratio
+            frame_height = (ymax_orig - ymin_orig) / h_ratio
+            frame_x = xmin_orig / w_ratio
+            # ReportLab의 y 좌표는 아래에서 위로 올라감. frame_y는 프레임의 바닥 좌표
+            frame_y = page_height - (ymax_orig / h_ratio)
 
-                if frame_width <= 0 or frame_height <= 0:
-                    # print(f"Debug: Page {i+1}, Bbox {j} ({cls_name}): Invalid frame dimensions. Skipping.")
-                    continue
-
-                if cls_id in translation_classes:
-                    text_content = text_translation(text_list, ts_model, tokenizer)
-                else: # 원본 텍스트 유지
-                    text_content = ' '.join(text_list)
-                
-                if not text_content.strip():
-                    # print(f"Debug: Page {i+1}, Bbox {j} ({cls_name}): Text content is empty. Skipping.")
-                    continue
-
-                # 각 Paragraph에 맞는 스타일(정렬 포함) 생성
-                current_alignment = TA_JUSTIFY
-                if cls_id in center_align_classes:
-                    current_alignment = TA_CENTER
-                
-                current_text_style = ParagraphStyle(
-                    f'TextStyle_Page{i}_Box{j}', # 고유한 이름
-                    parent=base_font_style,      # 기본 폰트 스타일 상속
-                    alignment=current_alignment,
-                    # fontSize, leading은 fit_text_to_frame에서 설정
-                )
-                
-                para = fit_text_to_frame(text_content, frame_width, frame_height, c, current_text_style, 
-                                         min_font_size=min_font_size_for_fit, 
-                                         max_font_size=initial_max_fontSize)
-                
-                text_frame = Frame(frame_x, frame_y, frame_width, frame_height, showBoundary=0,
-                                   leftPadding=1, rightPadding=1, topPadding=1, bottomPadding=1)
-                kif = KeepInFrame(frame_width, frame_height, [para], mode='truncate') 
-                text_frame.addFromList([kif], c)
-
+            if frame_width <= 0 or frame_height <= 0:
+                continue
+            
+            # 2. 원본 텍스트 가리기 (흰색 사각형)
+            # 배경색과 텍스트 영역이 흰색이 아닐 수도 있지만, 논문은 대부분 흰 배경
+            c.setFillColor("white")
+            c.setStrokeColor("white")
+            # x, y, width, height, fill=1 (채우기), stroke=0 (테두리 없음, 혹은 1로 흰색 테두리)
+            c.rect(frame_x, frame_y, frame_width, frame_height, fill=1, stroke=0)
+            
+            # 3. 텍스트 번역
+            if not ollama_mode:
+                text_content = text_translation(text_list, ts_model, tokenizer)
             else:
-                # === 이미지 요소 처리 ===
-                # bbox_xywh는 layout_detect에서 온 것이므로 직접 사용
-                cx, cy, w, h = bbox_xywh
-
-                xmin_crop = int(cx - (w/2))
-                ymin_crop = int(cy - (h/2))
-                xmax_crop = int(cx + (w/2))
-                ymax_crop = int(cy + (h/2))
-
-                img_w_pil, img_h_pil = image.size
-                actual_xmin_crop = max(0, xmin_crop)
-                actual_ymin_crop = max(0, ymin_crop)
-                actual_xmax_crop = min(img_w_pil, xmax_crop)
-                actual_ymax_crop = min(img_h_pil, ymax_crop)
-
-                if actual_xmin_crop >= actual_xmax_crop or actual_ymin_crop >= actual_ymax_crop:
-                    # print(f"Debug: Page {i+1}, Bbox {j} ({cls_name}): Invalid crop for image. Skipping.")
-                    continue
+                en = '.'.join(text_list)
+                prompt = f"""
+                You are a professional English (en) to Korean (ko) translator. Your goal is to accurately convey the meaning and nuances of the original English text while adhering to Korean grammar, vocabulary, and cultural sensitivities.
+                Produce only the Korean translation, without any additional explanations or commentary. Please translate the following English text into Korean:{en}
+                """
                 
                 try:
-                    pil_crop_image = image.crop((actual_xmin_crop, actual_ymin_crop, actual_xmax_crop, actual_ymax_crop))
-                except Exception as e_crop:
-                    # print(f"Debug: Page {i+1}, Bbox {j} ({cls_name}): Error cropping image: {e_crop}. Skipping.")
-                    continue
-                
-                if pil_crop_image.size[0] == 0 or pil_crop_image.size[1] == 0:
-                    # print(f"Debug: Page {i+1}, Bbox {j} ({cls_name}): Cropped image is empty. Skipping.")
-                    continue
+                    response = chat(
+                        model='translategemma:12b', # 모델명 확인 필요
+                        messages=[{'role': 'user', 'content': prompt}],
+                    )
+                    text_content = response.message.content
+                except Exception as e_ollama:
+                    print(f"Ollama error: {e_ollama}")
+                    text_content = en # 에러 시 원문 유지
 
-                # PDF에 이미지를 그릴 위치와 크기 (원본 bbox_xywh 기준)
-                pdf_draw_x = xmin_crop / w_ratio 
-                pdf_draw_y = page_height - (ymax_crop / h_ratio)
-                pdf_draw_width = w / w_ratio
-                pdf_draw_height = h / h_ratio
+            if not text_content.strip():
+                continue
 
-                if pdf_draw_width <= 0 or pdf_draw_height <= 0:
-                    # print(f"Debug: Page {i+1}, Bbox {j} ({cls_name}): Invalid PDF draw dimensions for image. Skipping.")
-                    continue
-                
-                try:
-                    img_reader_obj = ImageReader(pil_crop_image)
-                    c.drawImage(img_reader_obj, 
-                                pdf_draw_x, pdf_draw_y, 
-                                width=pdf_draw_width, height=pdf_draw_height,
-                                preserveAspectRatio=False, anchor='sw')
-                except Exception as e_draw:
-                    # print(f"Debug: Page {i+1}, Bbox {j} ({cls_name}): Error drawing image: {e_draw}. Skipping.")
-                    pass
+            # 4. 번역된 텍스트 그리기
+            current_alignment = TA_JUSTIFY
+            if cls_id in center_align_classes:
+                current_alignment = TA_CENTER
+            
+            current_text_style = ParagraphStyle(
+                f'TextStyle_Page{i}_Box{j}',
+                parent=base_font_style,
+                alignment=current_alignment,
+            )
+            
+            para = fit_text_to_frame(text_content, frame_width, frame_height, c, current_text_style, 
+                                     min_font_size=min_font_size_for_fit, 
+                                     max_font_size=initial_max_fontSize)
+            
+            text_frame = Frame(frame_x, frame_y, frame_width, frame_height, showBoundary=0,
+                               leftPadding=1, rightPadding=1, topPadding=1, bottomPadding=1)
+            kif = KeepInFrame(frame_width, frame_height, [para], mode='truncate') 
+            text_frame.addFromList([kif], c)
+
+            # 이미지/기타 요소 처리는 제거됨 (배경 이미지가 대체)
         
         if i < len(images) - 1:
             c.showPage()
@@ -435,8 +430,8 @@ if __name__ == '__main__':
     # 해당 경로에 파일들이 올바르게 위치해 있는지 확인해주세요.
     layout_yolo_ckpt = '/workspace/paper_translation/doclayout_yolo_weight/doclayout_yolo_doclaynet_imgsz1120_docsynth_pretrain.pt' 
     llm_ckpt_path = '/workspace/paper_translation/save_model/checkpoint-34951' # 이 변수는 현재 paper_translation 함수 내에서 직접 사용되지는 않음
-    pdf_file_path = '/workspace/paper_translation/pdf/Image Captioning through Image Transformer.pdf'
-    output_pdf_file_path = '/workspace/paper_translation/output_image_captioning_KOR_fitted.pdf'
+    pdf_file_path = '/workspace/paper_translation/pdf/en/2003.08934v2.pdf'
+    output_pdf_file_path = '/workspace/paper_translation/pdf/ko/2003.08934v2_KOR.pdf'
     nanum_font_path = '/workspace/paper_translation/font/NanumGothicBold.ttf' # 나눔고딕 폰트 파일 경로
 
     # YOLOv10, Unsloth 등 필요한 라이브러리 설치 확인
@@ -452,5 +447,6 @@ if __name__ == '__main__':
     paper_translation(layout_yolo_ckpt, 
                       llm_ckpt_path, 
                       pdf_file_path,
+                      ollama_mode=True,
                       output_pdf_path=output_pdf_file_path,
                       font_path=nanum_font_path)
