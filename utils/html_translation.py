@@ -3,7 +3,6 @@ import os
 import sys
 import torch
 import numpy as np
-import pdfkit
 import base64
 from io import BytesIO
 from PIL import Image
@@ -13,6 +12,7 @@ from pdf2image import convert_from_path
 from unsloth import FastLanguageModel
 import nltk
 from ollama import chat
+from weasyprint import HTML, CSS
 
 # Import existing utils
 # Assuming utils/text_translation.py is in the same directory or python path
@@ -298,19 +298,14 @@ def generate_html(content_list, output_path, font_path=None):
     return html
 
 def html_to_pdf(html_path, output_path):
-    options = {
-        'encoding': "UTF-8",
-        'enable-local-file-access': None,
-        'no-stop-slow-scripts': None,
-        'print-media-type': None,
-    }
     try:
-        pdfkit.from_file(html_path, output_path, options=options)
+        # Use WeasyPrint to generate PDF
+        print(f"Generating PDF using WeasyPrint from {html_path}...")
+        HTML(filename=html_path).write_pdf(output_path)
         print(f"PDF saved to {output_path}")
         return True
     except Exception as e:
-        print(f"Failed to generate PDF automatically: {e}")
-        # print(f"Please open {html_path} and print to PDF manually.")
+        print(f"Failed to generate PDF automatically with WeasyPrint: {e}")
         return False
 
 def run_html_translation(layout_ckpt, llm_ckpt, pdf_path, output_html_path, output_pdf_path, font_path, ollama_mode=True):
@@ -434,9 +429,9 @@ if __name__ == "__main__":
     # Settings
     layout_ckpt = '/workspace/paper_translation/doclayout_yolo_weight/doclayout_yolo_doclaynet_imgsz1120_docsynth_pretrain.pt'
     llm_ckpt = '/workspace/paper_translation/save_model/checkpoint-34951'
-    pdf_path = '/workspace/paper_translation/pdf/en/Model Context Protocol (MCP) Landscape, Security Threats.pdf'
-    output_html = '/workspace/paper_translation/pdf/ko/output.html'
-    output_pdf = '/workspace/paper_translation/pdf/ko/output_reflowed.pdf'
+    pdf_path = '/workspace/paper_translation/pdf/en/ACE-Step_1.5_Pushing_the_Boundaries_of_Open-Source_Music.pdf'
+    output_html = '/workspace/paper_translation/pdf/ko/ACE-Step_1.5_Pushing_the_Boundaries_of_Open-Source_Music.html'
+    output_pdf = '/workspace/paper_translation/pdf/ko/ACE-Step_1.5_Pushing_the_Boundaries_of_Open-Source_Music.pdf'
     nanum_font_path = '/workspace/paper_translation/font/NanumGothicBold.ttf'
     
     run_html_translation(layout_ckpt, llm_ckpt, pdf_path, output_html, output_pdf, nanum_font_path, ollama_mode=True)
