@@ -2,3 +2,7 @@ doclayout_yolo_weight/
 save_model/
 *.ipynb
 __pycache__
+__pycache__/*
+*.pdf
+*.html
+*.pyc
