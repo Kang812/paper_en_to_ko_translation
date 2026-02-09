@@ -384,6 +384,7 @@ def paper_translation(layout_yolo_ckpt,
                     response = chat(
                         model='translategemma:12b', # 모델명 확인 필요
                         messages=[{'role': 'user', 'content': prompt}],
+                        options={'repeat_penalty': 1.5, 'top_p':0.9}
                     )
                     text_content = response.message.content
                 except Exception as e_ollama:

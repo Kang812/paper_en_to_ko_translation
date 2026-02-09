@@ -398,8 +398,11 @@ def run_html_translation(layout_ckpt, llm_ckpt, pdf_path, output_html_path, outp
                     Input: {raw_text}
                     """
                     try:
-                        resp = chat(model='translategemma:4b', messages=[{'role':'user', 'content': prompt}])
-                        translated_text = resp.message.content
+                        resp = chat(
+                                    model='translategemma:12b', 
+                                    messages=[{'role':'user', 'content': prompt}],
+                                    options={'repeat_penalty': 1.5, 'top_p':0.9})
+                        translated_text = resp.message.content.replace("*", "")
                     except Exception as e:
                         print(f"Trans Error: {e}")
                         translated_text = raw_text

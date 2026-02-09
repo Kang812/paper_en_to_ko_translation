@@ -13,7 +13,7 @@ def main(args):
                         args.pdf_file_path,
                         output_html_path=args.output_pdf_file_path.replace('.pdf', '.html'),
                         output_pdf_path=args.output_pdf_file_path,
-                        font_path=args.nanum_font_path
+                        font_path=args.nanum_font_path,
                         ollama_mode=args.ollama_mode)
     else:
         if args.ollama_mode:
