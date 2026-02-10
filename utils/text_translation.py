@@ -278,16 +278,21 @@ def paper_translation(layout_yolo_ckpt,
         
     pdfmetrics.registerFont(TTFont('NanumGothic', font_path))
 
-    # 폰트 크기 설정값 조정
-    initial_max_fontSize = 24 # 기존 18에서 증가
-    min_font_size_for_fit = 12  # 기존 5에서 증가
+
     
+    # 폰트 크기 설정값 조정
+    initial_max_fontSize = 24 
+    min_font_size_for_fit = 8 # 최소 폰트 크기 약간 조정
+
     styles = getSampleStyleSheet()
-    # base_style은 기본 폰트만 정의하도록 단순화
+    
+    # 기본 폰트 스타일 정의 (나눔고딕)
     base_font_style = ParagraphStyle(
         'BaseFontStyle',
         parent=styles['Normal'],
         fontName='NanumGothic',
+        leading=14, # 기본 행간
+        firstLineIndent=0,
     )
     
     img_width, img_height = images[0].size
@@ -295,25 +300,22 @@ def paper_translation(layout_yolo_ckpt,
     page_width, page_height = img_width, img_height
 
     print("Translation and PDF generation started...")
-    # images[:6] 대신 전체 페이지 처리 (또는 테스트를 위해 원하는 페이지 수 지정)
+    
     for i, image in enumerate(tqdm(images, desc="Processing pages")): 
         
         w_ratio = 1.0 
         h_ratio = 1.0
         
-        # layout_detect 호출 시 NMS 임계값 조절 가능
-        # layout_detect 호출 시 NMS 임계값 조절 가능
+        # layout_detect 호출
         names_map, pred_bbox, pred_cls = layout_detect(
             layout_detect_model, 
             image, 
-            confidence_threshold=0.25, # 약간 상향 조정 (선택 사항)
-            nms_iou_thresh=0.4,        # NMS IoU 임계값 낮춰서 중복 제거 강화 (선택 사항)
-            class_agnostic=True        # Class-Agnostic NMS 활성화
+            confidence_threshold=0.25, 
+            nms_iou_thresh=0.4,       
+            class_agnostic=True        
         )
 
-        # 1. 페이지 전체 이미지를 배경으로 그리기 (Overlay 방식)
-        # 이미지 객체 생성 (ReportLab에서 사용 가능하도록 변환)
-        # image는 PIL Image 객체임
+        # 1. 페이지 전체 이미지를 배경으로 그리기
         try:
             full_page_img_reader = ImageReader(image)
             c.drawImage(full_page_img_reader, 0, 0, width=page_width, height=page_height)
@@ -327,22 +329,22 @@ def paper_translation(layout_yolo_ckpt,
             continue
 
         for j in range(len(pred_bbox)):
-            bbox_xywh = pred_bbox[j]  # xywh 형식
-            cls_id = int(pred_cls[j]) # 정수형 클래스 ID
+            bbox_xywh = pred_bbox[j]
+            cls_id = int(pred_cls[j]) 
             
             # 카테고리 정의 (DocLayNet 기준)
             # 0: Caption, 1: Footnote, 2: Formula, 3: List-item, 4: Page-footer, 5: Page-header
             # 6: Picture, 7: Section-header, 8: Table, 9: Text, 10: Title
             
-            # 텍스트로 처리할 클래스들 (이미지/표/수식 등을 제외한 대부분의 텍스트)
-            # 기존에는 일부만 번역했으나, 이제 Title(10), Header(5,7), Footer(4), Footnote(1) 등도 포함
             text_processing_classes = [0, 1, 3, 4, 5, 7, 9, 10]
             
-            # Title(10)만 중앙 정렬. Section-header(7)는 좌측 정렬이 일반적임.
-            # 사용자가 "부재목이 너무 뒤로가있다"고 한 것은 중앙 정렬로 인한 들여쓰기 현상일 가능성 높음.
-            center_align_classes = [10] 
-
-            # 표(8), 그림(6), 수식(2) 등은 배경 이미지에 이미 포함되어 있으므로 별도 처리 안함
+            # 클래스별 정렬 및 스타일 설정
+            # Title(10): 중앙 정렬, 큰 폰트 선호
+            # Section-header(7): 좌측 정렬, 볼드
+            # Page-header(5), Page-footer(4): 중앙 또는 좌측, 작은 폰트
+            # Cipher/Caption(0): 중앙 또는 좌측
+            # List-item(3): 좌측
+            
             if cls_id not in text_processing_classes:
                 continue
 
@@ -357,64 +359,93 @@ def paper_translation(layout_yolo_ckpt,
             frame_width = (xmax_orig - xmin_orig) / w_ratio
             frame_height = (ymax_orig - ymin_orig) / h_ratio
             frame_x = xmin_orig / w_ratio
-            # ReportLab의 y 좌표는 아래에서 위로 올라감. frame_y는 프레임의 바닥 좌표
             frame_y = page_height - (ymax_orig / h_ratio)
 
             if frame_width <= 0 or frame_height <= 0:
                 continue
             
-            # 2. 원본 텍스트 가리기 (흰색 사각형)
-            # 배경색과 텍스트 영역이 흰색이 아닐 수도 있지만, 논문은 대부분 흰 배경
+            # 2. 원본 텍스트 가리기 (흰색 사각형 + 패딩)
+            # 패딩을 추가하여 원본 글자가 삐져나오는 것을 방지
+            padding_x = 2
+            padding_y = 2
+            
             c.setFillColor("white")
             c.setStrokeColor("white")
-            # x, y, width, height, fill=1 (채우기), stroke=0 (테두리 없음, 혹은 1로 흰색 테두리)
-            c.rect(frame_x, frame_y, frame_width, frame_height, fill=1, stroke=0)
+            # x, y, width, height (y는 아래 기준)
+            # frame_y는 아래쪽 좌표이므로, 사각형을 그릴 때는 약간 더 아래로 내려야 함(padding_y)
+            c.rect(frame_x - padding_x, frame_y - padding_y, 
+                   frame_width + (padding_x*2), frame_height + (padding_y*2), 
+                   fill=1, stroke=0)
             
             # 3. 텍스트 번역
             if not ollama_mode:
                 text_content = text_translation(text_list, ts_model, tokenizer)
             else:
                 en = '.'.join(text_list)
+                # 프롬프트 개선: 자연스러운 한국어 연구 논문 스타일 요청
                 prompt = f"""
-                You are a professional English (en) to Korean (ko) translator. Your goal is to accurately convey the meaning and nuances of the original English text while adhering to Korean grammar, vocabulary, and cultural sensitivities.
-                Produce only the Korean translation, without any additional explanations or commentary. Please translate the following English text into Korean:{en}
+                Translate the following academic paper text from English to Korean.
+                Context: This is part of a research paper (Computer Science/AI domain).
+                Guidelines:
+                1. Maintain a professional, academic tone (e.g., use '습니다/합니다' or concise endings like '함/임' where appropriate for headers).
+                2. Preserve formatting such as bullet points (*), numbers (1.), or math variables if present and relevant.
+                3. Do NOT add explanations. Output ONLY the translated text.
+                
+                Input Text:
+                {en}
                 """
                 
                 try:
                     response = chat(
-                        model='translategemma:12b', # 모델명 확인 필요
+                        model='translategemma:12b',
                         messages=[{'role': 'user', 'content': prompt}],
-                        options={'repeat_penalty': 1.5, 'top_p':0.9}
+                        options={'repeat_penalty': 1.1, 'top_p': 0.9} # 반복 페널티 약간 완화
                     )
                     text_content = response.message.content
                 except Exception as e_ollama:
                     print(f"Ollama error: {e_ollama}")
-                    text_content = en # 에러 시 원문 유지
+                    text_content = en 
 
             if not text_content.strip():
                 continue
 
-            # 4. 번역된 텍스트 그리기
-            current_alignment = TA_JUSTIFY
-            if cls_id in center_align_classes:
+            # 4. 번역된 텍스트 스타일 설정 (클래스 기반)
+            current_alignment = TA_JUSTIFY # 기본값: 양쪽 정렬
+            
+            if cls_id == 10: # Title
+                current_alignment = TA_CENTER
+            elif cls_id == 7: # Section Header
+                current_alignment = TA_JUSTIFY # 혹은 TA_LEFT
+                # 헤더는 보통 꽉 차지 않으므로 Left가 나을 수 있으나, Justify도 무방
+            elif cls_id in [0, 4, 5]: # Caption, Footer, Header
                 current_alignment = TA_CENTER
             
             current_text_style = ParagraphStyle(
                 f'TextStyle_Page{i}_Box{j}',
                 parent=base_font_style,
                 alignment=current_alignment,
+                # 한글 단어 단위 줄바꿈을 위해 wordWrap 설정 (ReportLab 기본 동작 확인 필요)
             )
             
-            para = fit_text_to_frame(text_content, frame_width, frame_height, c, current_text_style, 
-                                     min_font_size=min_font_size_for_fit, 
-                                     max_font_size=initial_max_fontSize)
+            # Title(10)이나 Header(7)는 폰트를 좀 더 키워도 됨
+            target_min_font = min_font_size_for_fit
+            target_max_font = initial_max_fontSize
             
+            if cls_id == 10: # Title
+                target_min_font = 14
+            elif cls_id == 7: # Section Header
+                target_min_font = 10
+            
+            para = fit_text_to_frame(text_content, frame_width, frame_height, c, current_text_style, 
+                                     min_font_size=target_min_font, 
+                                     max_font_size=target_max_font)
+            
+            # Frame 생성 (패딩 제거 또는 최소화, 이미 박스로 가렸으므로)
             text_frame = Frame(frame_x, frame_y, frame_width, frame_height, showBoundary=0,
-                               leftPadding=1, rightPadding=1, topPadding=1, bottomPadding=1)
-            kif = KeepInFrame(frame_width, frame_height, [para], mode='truncate') 
+                               leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+            
+            kif = KeepInFrame(frame_width, frame_height, [para], mode='shrink') # mode='shrink' or 'truncate'
             text_frame.addFromList([kif], c)
-
-            # 이미지/기타 요소 처리는 제거됨 (배경 이미지가 대체)
         
         if i < len(images) - 1:
             c.showPage()
@@ -423,27 +454,18 @@ def paper_translation(layout_yolo_ckpt,
     print(f"PDF saved to {output_pdf_path}")
 
 if __name__ == '__main__':
-    # 경로들은 실제 환경에 맞게 설정해야 합니다.
-    # 예시 경로는 '/workspace/'로 시작하지만, 로컬 환경에서는 다를 수 있습니다.
-    # 실제 파일들이 존재하는지 확인하세요.
-    
-    # 도커 환경이나 특정 작업공간 경로를 사용하시는 것 같습니다.
-    # 해당 경로에 파일들이 올바르게 위치해 있는지 확인해주세요.
+    # 경로 설정 (사용자 환경에 맞게 수정)
     layout_yolo_ckpt = '/workspace/paper_translation/doclayout_yolo_weight/doclayout_yolo_doclaynet_imgsz1120_docsynth_pretrain.pt' 
-    llm_ckpt_path = '/workspace/paper_translation/save_model/checkpoint-34951' # 이 변수는 현재 paper_translation 함수 내에서 직접 사용되지는 않음
+    llm_ckpt_path = '/workspace/paper_translation/save_model/checkpoint-34951' 
+    
+    # 테스트용 파일 경로 (존재 여부 확인 필요)
     pdf_file_path = '/workspace/paper_translation/pdf/en/2003.08934v2.pdf'
     output_pdf_file_path = '/workspace/paper_translation/pdf/ko/2003.08934v2_KOR.pdf'
-    nanum_font_path = '/workspace/paper_translation/font/NanumGothicBold.ttf' # 나눔고딕 폰트 파일 경로
+    nanum_font_path = '/workspace/paper_translation/font/NanumGothicBold.ttf' 
 
-    # YOLOv10, Unsloth 등 필요한 라이브러리 설치 확인
-    # pytesseract Tesseract OCR 설치 및 경로 설정 확인
-    # pdf2image poppler 설치 확인
-    
     print(f"Using Layout YOLO checkpoint: {layout_yolo_ckpt}")
-    print(f"Using LLM checkpoint (hardcoded in function): {llm_ckpt_path}") # 실제로는 함수 내 경로 사용
     print(f"Input PDF: {pdf_file_path}")
     print(f"Output PDF will be: {output_pdf_file_path}")
-    print(f"Using Font: {nanum_font_path}")
 
     paper_translation(layout_yolo_ckpt, 
                       llm_ckpt_path, 
