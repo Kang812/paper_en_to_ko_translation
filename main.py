@@ -1,8 +1,7 @@
 from utils.text_translation import paper_translation
 from utils.html_translation import run_html_translation
 from tqdm import tqdm
-from unsloth import FastLanguageModel
-from unsloth.chat_templates import get_chat_template
+
 import argparse
 
 def main(args):
@@ -26,9 +25,7 @@ def main(args):
 
         paper_translation(
                         args.layout_yolo_ckpt, 
-                        args.llm_ckpt_path, 
                         args.pdf_file_path,
-                        args.ollama_mode,
                         output_pdf_path=args.output_pdf_file_path,
                         font_path=args.nanum_font_path)
 

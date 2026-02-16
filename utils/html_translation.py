@@ -17,7 +17,7 @@ from weasyprint import HTML, CSS
 # Import existing utils
 # Assuming utils/text_translation.py is in the same directory or python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from text_translation import layout_detect, image_to_text, text_translation
+from text_translation import layout_detect, image_to_text
 
 def sort_layout_boxes(boxes, classes, page_width, page_height):
     """

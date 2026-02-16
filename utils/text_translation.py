@@ -1,17 +1,19 @@
-from tqdm import tqdm
+import os
 import torch
 import numpy as np
-# import base64 # base64는 코드에서 사용되지 않아 주석 처리
-# import matplotlib.pyplot as plt # matplotlib.pyplot는 코드에서 사용되지 않아 주석 처리
-# import io # io는 코드에서 사용되지 않아 주석 처리
-from reportlab.pdfgen import canvas
-from doclayout_yolo import YOLOv10 # 실제 사용하신다면 이 라이브러리가 설치되어 있어야 합니다.
-from PIL import Image # ImageChops는 사용되지 않아 제거
-# import matplotlib as mpl # matplotlib.mpl은 코드에서 사용되지 않아 주석 처리
 import re
-from unsloth import FastLanguageModel
+import pdfplumber
+import collections
+import nltk # sent_tokenize 사용을 위해 nltk 다운로드 확인 로직 추가
+try:
+    from utils.lang_config import LangConfig
+except:
+    try:
+        from lang_config import LangConfig
+    except:
+        from .lang_config import LangConfig
+
 from pdf2image import convert_from_path
-import pytesseract
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -19,12 +21,13 @@ from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import Paragraph, Frame, KeepInFrame
 from nltk.tokenize import sent_tokenize
-import torch
 from torchvision.ops import nms # NMS를 위해 torchvision.ops 임포
-import nltk # sent_tokenize 사용을 위해 nltk 다운로드 확인 로직 추가
+from tqdm import tqdm
+from reportlab.pdfgen import canvas
+from doclayout_yolo import YOLOv10 # 실제 사용하신다면 이 라이브러리가 설치되어 있어야 합니다.
+from PIL import Image
 from ollama import chat
-import pdfplumber
-import collections
+
 
 # nltk 'punkt' 리소스 확인 및 다운로드 (sent_tokenize 사용에 필요)
 try:
@@ -76,32 +79,6 @@ def get_font_size_from_pdf(pdf_path, page_num, bbox):
     except Exception as e:
         print(f"Error extracting font size: {e}")
         return None
-
-def translate_model(model, tokenizer, text, device):
-    messages = [{"role": "user", "content": text}]
-    inputs = tokenizer.apply_chat_template(
-        messages,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
-    ).to(device)
-
-    outputs = model.generate(
-        input_ids=inputs,
-        max_new_tokens=128, # 번역 결과 길이에 따라 조절 가능
-        use_cache=True,
-        # temperature=3.5, # 매우 높은 값, 좀 더 일반적인 값(예: 0.7-1.0) 또는 제거 고려
-        # min_p=0.9          # nucleus sampling, top_p와 유사. 필요에 따라 조절
-        # 더 일반적인 생성 파라미터 예시:
-        temperature=0.7,
-        top_p=0.9,
-        do_sample=True,
-    )
-    translation = tokenizer.batch_decode(outputs)[0]
-    translation = translation.split("<|end_header_id|>")[-1] \
-                             .replace("\n\n", " ") \
-                             .replace("<|eot_id|>", "").strip() # 양 끝 공백 제거 추가
-    return translation
 
 def layout_detect(model, image, confidence_threshold=0.2, nms_iou_thresh=0.5, class_agnostic=True):
     """
@@ -176,6 +153,20 @@ def layout_detect(model, image, confidence_threshold=0.2, nms_iou_thresh=0.5, cl
 
     return names_map, pred_bbox_np, pred_cls_np
 
+def ocr_image(crop_image):
+    image_path = '/workspace/paper_translation/utils/crop_image/crop_image.png'
+    crop_image.save(image_path)
+    
+    response = chat(
+        model='glm-ocr:bf16',
+        messages=[{'role': 'user', 'content': 'Text Recognition', 'images':[image_path]}],
+    )
+    
+    os.remove(image_path)
+    text = response.message.content
+
+    return text
+
 def image_to_text(image, bbox):
     cx, cy, w, h = bbox
 
@@ -195,34 +186,13 @@ def image_to_text(image, bbox):
         print(f"Warning: Crop size is zero for bbox {bbox}. Original image part: {xmin, ymin, xmax, ymax}")
         return [], [xmin, ymin, xmax, ymax]
         
-    text = pytesseract.image_to_string(crop_img, lang="eng")
-    
+    text = ocr_image(crop_img)
     text = re.sub(r'[\n\x0c]+', ' ', text).strip() 
     if not text: 
         return [], [xmin, ymin, xmax, ymax]
         
     sentences = sent_tokenize(text)
     return sentences, [xmin, ymin, xmax, ymax]
-
-def text_translation(text_list, ts_model, tokenizer):
-    en_to_ko_list = []
-    
-    for en_text in text_list:
-        if not en_text.strip(): 
-            continue
-        if en_text.lower() == 'abstract': 
-            en_to_ko_list.append("요약") 
-        else:
-            try:
-                translation_en_to_ko = translate_model(ts_model, tokenizer, en_text, 
-                                                       torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-                en_to_ko_list.append(translation_en_to_ko)
-            except Exception as e:
-                print(f"Error during translation of '{en_text}': {e}")
-                en_to_ko_list.append(f"[번역 오류] {en_text}")
-
-    text_en_to_ko = ' '.join(en_to_ko_list)
-    return text_en_to_ko
 
 def fit_text_to_frame(text_content, width, height, canvas_obj, base_style, target_font_size=None, min_font_size=6, max_font_size=24):
     """
@@ -263,30 +233,25 @@ def fit_text_to_frame(text_content, width, height, canvas_obj, base_style, targe
     return Paragraph(text_content, style)
 
 def paper_translation(layout_yolo_ckpt,
-                      llm_ckpt, 
                       pdf_path,
-                      ollama_mode=False,
+                      source_lang = "영어",
+                      target_lang = "한국어",
                       output_pdf_path="/workspace/paper_translation/output_final.pdf", 
                       font_path='/workspace/paper_translation/font/NanumGothicBold.ttf'):
     
     print("Loading layout detection model...")
     layout_detect_model = YOLOv10(layout_yolo_ckpt)
-
-    print("Loading translation LLM...")
-    max_seq_length = 2048
-    dtype = None
-    load_in_4bit = True
-
-    if not ollama_mode:
-        ts_model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=llm_ckpt, 
-            max_seq_length=max_seq_length,
-            dtype=dtype,
-            load_in_4bit=load_in_4bit,
-        )
-
+    
     print(f"Converting PDF to images: {pdf_path}")
     
+    lang_config = LangConfig()
+    source_lang = lang_config.get_ko_to_en(source_lang)
+    target_lang = lang_config.get_ko_to_en(target_lang)
+
+    source_lang_code = lang_config.get_lang_code(source_lang)
+    target_lang_code = lang_config.get_lang_code(target_lang)
+
+
     try:
         images = convert_from_path(pdf_path, dpi=200)
     except Exception as e:
@@ -299,8 +264,8 @@ def paper_translation(layout_yolo_ckpt,
         
     pdfmetrics.registerFont(TTFont('NanumGothic', font_path))
 
-    initial_max_fontSize = 24 
-    min_font_size_for_fit = 6
+    initial_max_fontSize = 40  # Base size in points (will be scaled)
+    min_font_size_for_fit = 8 # Base minimum size in points
 
     styles = getSampleStyleSheet()
     
@@ -382,32 +347,28 @@ def paper_translation(layout_yolo_ckpt,
                    frame_width + (padding_x*2), frame_height + (padding_y*2), 
                    fill=1, stroke=0)
             
-            if not ollama_mode:
-                text_content = text_translation(text_list, ts_model, tokenizer)
-            else:
-                en = '.'.join(text_list)
-                prompt = f"""
-                Translate the following academic paper text from English to Korean.
-                Context: This is part of a research paper (Computer Science/AI domain).
-                Guidelines:
-                1. Maintain a professional, academic tone.
-                2. Preserve formatting such as bullet points (*), numbers (1.), or math variables.
-                3. Do NOT add explanations. Output ONLY the translated text.
-                
-                Input Text:
-                {en}
-                """
-                
-                try:
-                    response = chat(
-                        model='translategemma:12b',
-                        messages=[{'role': 'user', 'content': prompt}],
-                        options={'repeat_penalty': 1.1, 'top_p': 0.9} 
-                    )
-                    text_content = response.message.content
-                except Exception as e_ollama:
-                    print(f"Ollama error: {e_ollama}")
-                    text_content = en 
+            en = '.'.join(text_list)
+            prompt = f"""
+            You are a professional {source_lang} ({source_lang_code}) to {target_lang} ({target_lang_code}) translator. 
+            Your goal is to accurately convey the meaning and nuances of the original {source_lang} text while 
+            adhering to {target_lang} grammar, vocabulary, and cultural sensitivities.
+            Produce only the {target_lang} translation, without any additional explanations or commentary. 
+            Please translate the following {source_lang} text into {target_lang}:
+            
+            Input Text:
+            {en}
+            """
+            
+            try:
+                response = chat(
+                    model='translategemma:12b',
+                    messages=[{'role': 'user', 'content': prompt}],
+                    options={'repeat_penalty': 1.5, 'top_p': 0.9} 
+                )
+                text_content = response.message.content
+            except Exception as e_ollama:
+                print(f"Ollama error: {e_ollama}")
+                text_content = en 
 
             if not text_content.strip():
                 continue
@@ -438,14 +399,8 @@ def paper_translation(layout_yolo_ckpt,
                     pass
 
             # 5. 번역된 텍스트 스타일 설정
-            current_alignment = TA_JUSTIFY 
-            
-            if cls_id == 10: # Title
-                current_alignment = TA_CENTER
-            elif cls_id == 7: # Section Header
-                current_alignment = TA_JUSTIFY 
-            elif cls_id in [0, 4, 5]: # Caption, Footer, Header
-                current_alignment = TA_CENTER
+            # Alignment is now handled in the DPI scaling block below
+            current_alignment = TA_JUSTIFY
             
             current_text_style = ParagraphStyle(
                 f'TextStyle_Page{i}_Box{j}',
@@ -458,16 +413,40 @@ def paper_translation(layout_yolo_ckpt,
             
             target_size = extracted_font_size if extracted_font_size else None
             
-            if cls_id == 10: 
-                if target_size: target_size = target_size * 1.2 
-                target_min_font = 14
-            elif cls_id == 7: 
-                target_min_font = 10
+            # DPI Scaling Factor (PDF points to Image pixels)
+            DPI_SCALE = 200 / 72.0 
             
+            if cls_id == 10: 
+                # Title: usually 24pt -> ~66px
+                if target_size: target_size = max(target_size * DPI_SCALE * 1.2, 24 * DPI_SCALE) 
+                else: target_size = 28 * DPI_SCALE
+                target_min_font = 18 * DPI_SCALE
+                current_text_style.alignment = TA_CENTER
+                current_text_style.leading = target_size * 1.2
+            elif cls_id == 7: 
+                # Section Header: usually 12-14pt -> ~33-39px
+                if target_size: target_size = max(target_size * DPI_SCALE * 1.1, 14 * DPI_SCALE)
+                else: target_size = 14 * DPI_SCALE
+                target_min_font = 11 * DPI_SCALE
+                current_text_style.alignment = TA_JUSTIFY
+                current_text_style.leading = target_size * 1.2
+            elif cls_id == 9: # Text
+                # Body Text: usually 10-11pt -> ~28-30px
+                if target_size: target_size = max(target_size * DPI_SCALE * 1.0, 10 * DPI_SCALE)
+                else: target_size = 10 * DPI_SCALE
+                target_min_font = 9 * DPI_SCALE # Minimum readable size
+                current_text_style.alignment = TA_JUSTIFY
+                current_text_style.leading = target_size * 1.3 # Slightly more leading for Korean body
+            else:
+                 # Default logic for others
+                 if target_size: target_size = max(target_size * DPI_SCALE, 10 * DPI_SCALE)
+                 else: target_size = 10 * DPI_SCALE
+                 target_min_font = 8 * DPI_SCALE
+
             para = fit_text_to_frame(text_content, frame_width, frame_height, c, current_text_style, 
                                      target_font_size=target_size, 
                                      min_font_size=target_min_font, 
-                                     max_font_size=target_max_font)
+                                     max_font_size=target_max_font * DPI_SCALE)
             
             text_frame = Frame(frame_x, frame_y, frame_width, frame_height, showBoundary=0,
                                leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
@@ -486,7 +465,6 @@ def paper_translation(layout_yolo_ckpt,
 
 if __name__ == '__main__':
     layout_yolo_ckpt = '/workspace/paper_translation/doclayout_yolo_weight/doclayout_yolo_doclaynet_imgsz1120_docsynth_pretrain.pt' 
-    llm_ckpt_path = '/workspace/paper_translation/save_model/checkpoint-34951' 
     
     pdf_file_path = '/workspace/paper_translation/pdf/en/2003.08934v2.pdf'
     output_pdf_file_path = '/workspace/paper_translation/pdf/ko/2003.08934v2_KOR.pdf'
@@ -495,8 +473,7 @@ if __name__ == '__main__':
     print(f"Using Layout YOLO checkpoint: {layout_yolo_ckpt}")
     print(f"Input PDF: {pdf_file_path}")
     print(f"Output PDF will be: {output_pdf_file_path}")
-
-    # pdfplumber 설치 안내
+    
     try:
         import pdfplumber
     except ImportError:
@@ -504,8 +481,8 @@ if __name__ == '__main__':
         print("Please install it: pip install pdfplumber")
 
     paper_translation(layout_yolo_ckpt, 
-                      llm_ckpt_path, 
                       pdf_file_path,
-                      ollama_mode=True,
+                      source_lang = "영어",
+                      target_lang = "한국어",
                       output_pdf_path=output_pdf_file_path,
                       font_path=nanum_font_path)
