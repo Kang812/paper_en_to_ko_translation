@@ -4,7 +4,10 @@ import streamlit as st
 import tempfile
 import argparse
 import shutil
+from utils.translation import translate_text
 from utils.html_translation import run_html_translation
+from utils.text_translation import paper_translation
+from utils.lang_config import LangConfig
 from streamlit_option_menu import option_menu
 
 # Set page configuration
@@ -71,8 +74,8 @@ st.markdown("""
 
 def main():
     with st.sidebar:
-        choice = option_menu("메뉴", ["번역기", "문서 번역(단순)", "문서 번역(문맥 이해)"],
-                             icons=['translate', 'file-text', 'book'],
+        choice = option_menu("메뉴", ["번역기", "문서 번역"],
+                             icons=['translate', 'file-text'],
                              menu_icon="cast", default_index=1,
                              styles={
                                  "container": {"padding": "5!important", "background-color": "#ffffff"},
@@ -83,108 +86,168 @@ def main():
                             )
 
     if choice == "번역기":
-        st.title("번역기")
-        st.info("준비 중입니다!")
+        st.title("🤖 AI 번역기")
+        
+        # Load Language Config
+        lang_config = LangConfig()
+        lang_options = list(lang_config.lang_ko_en.keys())
+        
+        # Initialize session state for translation result if not exists
+        if 'translated_text' not in st.session_state:
+            st.session_state.translated_text = ""
+            
+        with st.container(border=True):
+            # Language Selection
+            col1, col2 = st.columns(2)
+            with col1:
+                source_lang = st.selectbox("원문 언어 (Source)", options=lang_options, index=lang_options.index("영어"))
+            with col2:
+                target_lang = st.selectbox("번역 언어 (Target)", options=lang_options, index=lang_options.index("한국어"))
+            
+            st.markdown("---")
+            
+            # Text Areas
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("### 원문 입력")
+                input_text = st.text_area("번역할 텍스트를 입력하세요", height=400, label_visibility="collapsed", placeholder="여기에 번역할 내용을 입력하세요...")
+            
+            with c2:
+                st.markdown("### 번역 결과")
+                st.text_area("번역 결과", value=st.session_state.translated_text, height=400, label_visibility="collapsed", disabled=False)
 
-    elif choice == "문서 번역(단순)":
+            # Check for changes in input (to clear previous result if needed, optional)
+            
+            # Translate Button
+            if st.button("🚀 번역하기", use_container_width=True):
+                if input_text:
+                    with st.spinner("번역 중입니다..."):
+                        try:
+                            translated_result = translate_text(input_text, source_lang, target_lang)
+                            st.session_state.translated_text = translated_result
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"번역 중 오류가 발생했습니다: {str(e)}")
+                else:
+                    st.warning("번역할 텍스트를 입력해주세요.")
+
+    elif choice == "문서 번역":
         st.title("📄 PDF 논문 한국어 번역")
-        st.markdown("""
-        <div style='margin-bottom: 2rem;'>
-            PDF 논문을 업로드하면 원본 레이아웃을 최대한 유지하면서 한국어로 번역합니다.<br>
-            이 도구는 <b>Layout Analysis Model</b>과 <b>LLM</b>을 사용하여 정교한 번역을 수행합니다.
-        </div>
-        """, unsafe_allow_html=True)
+        
+        # 1. Define Layout Areas (Top to Bottom)
+        header_container = st.container()
+        st.markdown("---") # Separator
+        settings_container = st.container(border=True)
+        result_container = st.container()
 
         # --- Configuration (Hidden) ---
         # Default paths based on main.py
         layout_ckpt = "/workspace/paper_translation/doclayout_yolo_weight/doclayout_yolo_doclaynet_imgsz1120_docsynth_pretrain.pt"
-        llm_ckpt = "/workspace/paper_translation/save_model/checkpoint-34951"
         font_path = "./font/NanumGothicBold.ttf"
-        ollama_mode = False
+        
+        # Load Language Config
+        lang_config = LangConfig()
+        lang_options = list(lang_config.lang_ko_en.keys())
 
-        # --- Main Area ---
-        # Using st.container(border=True) to create card-like sections
-        with st.container(border=True):
-            st.markdown("### 📤 PDF 업로드")
+        # --- Settings Area (Bottom) ---
+        with settings_container:
+            st.markdown("### 📤 PDF 업로드 및 설정")
             uploaded_file = st.file_uploader("번역할 PDF 파일을 선택해주세요", type="pdf")
-
-        if uploaded_file is not None:
-            # Add some spacing
-            st.markdown("<br>", unsafe_allow_html=True)
             
-            col1, col2, col3 = st.columns([1, 2, 1])
-            with col2:
-                start_btn = st.button("🚀 번역 시작")
+            st.markdown("---")
+            l_col1, l_col2 = st.columns(2)
+            with l_col1:
+                source_lang = st.selectbox("원문 언어 (Source)", options=lang_options, index=lang_options.index("영어"))
+            with l_col2:
+                target_lang = st.selectbox("번역 언어 (Target)", options=lang_options, index=lang_options.index("한국어"))
+            
+            st.markdown("---")
+            preserve_layout = st.checkbox("문서 구조 유지 (Preserve Layout)", value=False, help="원본 PDF의 레이아웃을 최대한 유지합니다. (체크 해제 시 가독성을 위해 재구성됨)")
 
-            if start_btn:
-                with st.spinner('번역 중입니다... 문서를 분석하고 번역하는 동안 잠시만 기다려주세요.'):
-                    # Create a temporary directory for processing
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        # Save uploaded file to temp path
-                        input_path = os.path.join(temp_dir, uploaded_file.name)
-                        with open(input_path, "wb") as f:
-                            f.write(uploaded_file.getbuffer())
-                        
-                        # Define output paths
-                        output_html_name = os.path.splitext(uploaded_file.name)[0] + "_translated.html"
-                        output_pdf_name = os.path.splitext(uploaded_file.name)[0] + "_translated.pdf"
-                        
-                        output_html_path = os.path.join(temp_dir, output_html_name)
-                        output_pdf_path = os.path.join(temp_dir, output_pdf_name)
+        # --- Header Area (Top) ---
+        with header_container:
+            h_col1, h_col2 = st.columns([3, 1])
+            with h_col1:
+                st.markdown("""
+                <div style='margin-bottom: 0rem;'>
+                    PDF 논문을 업로드하면 원본 레이아웃을 최대한 유지하면서 한국어로 번역합니다.<br>
+                    이 도구는 <b>Layout Analysis Model</b>과 <b>LLM</b>을 사용하여 정교한 번역을 수행합니다.
+                </div>
+                """, unsafe_allow_html=True)
+            with h_col2:
+                # Add some vertical spacing to align button better with text
+                st.markdown("<br>", unsafe_allow_html=True)
+                # Disable button if no file uploaded
+                start_btn = st.button("🚀 번역 시작", disabled=(uploaded_file is None), use_container_width=True)
 
-                        try:
-                            # Run the translation
-                            run_html_translation(
-                                layout_ckpt=layout_ckpt,
-                                llm_ckpt=llm_ckpt,
-                                pdf_path=input_path,
-                                output_html_path=output_html_path,
-                                output_pdf_path=output_pdf_path,
-                                font_path=font_path,
-                                ollama_mode=ollama_mode
-                            )
+        # --- Processing Logic ---
+        if start_btn:
+            if uploaded_file is None:
+                st.warning("먼저 PDF 파일을 업로드해주세요.")
+            else:
+                with result_container:
+                    with st.spinner('번역 중입니다... 문서를 분석하고 번역하는 동안 잠시만 기다려주세요.'):
+                        # Create a temporary directory for processing
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            # Save uploaded file to temp path
+                            input_path = os.path.join(temp_dir, uploaded_file.name)
+                            with open(input_path, "wb") as f:
+                                f.write(uploaded_file.getbuffer())
+                            
+                            # Define output paths
+                            output_html_name = os.path.splitext(uploaded_file.name)[0] + "_translated.html"
+                            output_pdf_name = os.path.splitext(uploaded_file.name)[0] + "_translated.pdf"
+                            
+                            output_html_path = os.path.join(temp_dir, output_html_name)
+                            output_pdf_path = os.path.join(temp_dir, output_pdf_name)
 
-                            # Result Section in a Card
-                            with st.container(border=True):
-                                st.markdown("### 🎉 번역 완료!")
-                                st.success("번역이 성공적으로 완료되었습니다. 아래 버튼을 눌러 결과를 다운로드하세요.")
-                                st.markdown("---")
-
-                                # Create columns for download buttons
-                                d_col1, d_col2 = st.columns(2)
-
-                                # Check if files were created
-                                if os.path.exists(output_html_path):
-                                    with open(output_html_path, "rb") as f:
-                                        html_data = f.read()
-                                    d_col1.download_button(
-                                        label="📥 HTML 다운로드",
-                                        data=html_data,
-                                        file_name=output_html_name,
-                                        mime="text/html"
+                            try:
+                                if preserve_layout:
+                                    # Use text_translation.py (Structure Preserved)
+                                    paper_translation(
+                                        layout_yolo_ckpt=layout_ckpt,
+                                        pdf_path=input_path,
+                                        source_lang=source_lang,
+                                        target_lang=target_lang,
+                                        output_pdf_path=output_pdf_path,
+                                        font_path=font_path
                                     )
                                 else:
-                                    d_col1.error("HTML 파일이 생성되지 않았습니다.")
-
-                                if os.path.exists(output_pdf_path):
-                                    with open(output_pdf_path, "rb") as f:
-                                        pdf_data = f.read()
-                                    d_col2.download_button(
-                                        label="📥 PDF 다운로드",
-                                        data=pdf_data,
-                                        file_name=output_pdf_name,
-                                        mime="application/pdf"
+                                    # Use html_translation.py (Structure NOT Preserved)
+                                    run_html_translation(
+                                        layout_ckpt=layout_ckpt,
+                                        pdf_path=input_path,
+                                        source_lang=source_lang,
+                                        target_lang=target_lang,
+                                        output_html_path=output_html_path,
+                                        output_pdf_path=output_pdf_path,
+                                        font_path=font_path
                                     )
-                                else:
-                                    d_col2.error("PDF 파일이 생성되지 않았습니다.")
 
-                        except Exception as e:
-                            st.error(f"번역 중 오류가 발생했습니다: {str(e)}")
-                            st.exception(e)
+                                # Result Section in a Card
+                                with st.container(border=True):
+                                    st.markdown("### 🎉 번역 완료!")
+                                    st.success("번역이 성공적으로 완료되었습니다. 아래 버튼을 눌러 결과를 다운로드하세요.")
+                                    st.markdown("---")
 
-    elif choice == "문서 번역(문맥 이해)":
-        st.title("문서 번역(문맥 이해)")
-        st.info("준비 중입니다!")
+                                    # Check if PDF file was created
+                                    if os.path.exists(output_pdf_path):
+                                        with open(output_pdf_path, "rb") as f:
+                                            pdf_data = f.read()
+                                        
+                                        st.download_button(
+                                            label="📥 PDF 다운로드",
+                                            data=pdf_data,
+                                            file_name=output_pdf_name,
+                                            mime="application/pdf",
+                                            use_container_width=True
+                                        )
+                                    else:
+                                        st.error("PDF 파일이 생성되지 않았습니다.")
+
+                            except Exception as e:
+                                st.error(f"번역 중 오류가 발생했습니다: {str(e)}")
+                                st.exception(e)
 
 if __name__ == "__main__":
     main()

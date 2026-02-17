@@ -27,6 +27,26 @@ from reportlab.pdfgen import canvas
 from doclayout_yolo import YOLOv10 # 실제 사용하신다면 이 라이브러리가 설치되어 있어야 합니다.
 from PIL import Image
 from ollama import chat
+from pylatexenc.latex2text import LatexNodes2Text
+
+def clean_latex_math(text):
+    """
+    Converts LaTeX math expressions in the text (e.g., $1920 \times$) to Unicode text.
+    """
+    try:
+        def replace_math(match):
+            latex_source = match.group(1)
+            try:
+                # keep_inline_math=False ensures we get unicode if possible
+                return LatexNodes2Text().latex_to_text(latex_source).strip()
+            except:
+                return match.group(0)
+        
+        # Regex for inline math $...$
+        return re.sub(r'\$(.*?)\$', replace_math, text)
+    except Exception as e:
+        print(f"Warning: clean_latex_math failed: {e}")
+        return text
 
 
 # nltk 'punkt' 리소스 확인 및 다운로드 (sent_tokenize 사용에 필요)
@@ -315,6 +335,9 @@ def paper_translation(layout_yolo_ckpt,
                  c.showPage()
             continue
 
+        # Store drawing operations to execute in order: Backgrounds first, then Text
+        draw_items = []
+
         for j in range(len(pred_bbox)):
             bbox_xywh = pred_bbox[j]
             cls_id = int(pred_cls[j]) 
@@ -338,16 +361,16 @@ def paper_translation(layout_yolo_ckpt,
             if frame_width <= 0 or frame_height <= 0:
                 continue
             
-            padding_x = 2
-            padding_y = 2
             
-            c.setFillColor("white")
-            c.setStrokeColor("white")
-            c.rect(frame_x - padding_x, frame_y - padding_y, 
-                   frame_width + (padding_x*2), frame_height + (padding_y*2), 
-                   fill=1, stroke=0)
+            # Define margins (Increased to 15px for safe gap between columns)
+            text_margin = 15 
+            bg_padding = 5   # Padding for erasing background
             
             en = '.'.join(text_list)
+            
+            # Pre-process LaTeX math to Unicode
+            en = clean_latex_math(en)
+
             prompt = f"""
             You are a professional {source_lang} ({source_lang_code}) to {target_lang} ({target_lang_code}) translator. 
             Your goal is to accurately convey the meaning and nuances of the original {source_lang} text while 
@@ -448,10 +471,36 @@ def paper_translation(layout_yolo_ckpt,
                                      min_font_size=target_min_font, 
                                      max_font_size=target_max_font * DPI_SCALE)
             
-            text_frame = Frame(frame_x, frame_y, frame_width, frame_height, showBoundary=0,
-                               leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+            # Store item for later drawing
+            draw_items.append({
+                'rect': (frame_x - padding_x, frame_y - padding_y, frame_width + (padding_x*2), frame_height + (padding_y*2)),
+                'frame': (frame_x, frame_y, frame_width, frame_height),
+                'para': para
+            })
+        
+        # Pass 1: Draw all Backgrounds
+        c.setFillColor("white")
+        c.setStrokeColor("white")
+        for item in draw_items:
+            rx, ry, rw, rh = item['rect']
+            c.rect(rx, ry, rw, rh, fill=1, stroke=0)
             
-            kif = KeepInFrame(frame_width, frame_height, [para], mode='shrink') 
+        # Pass 2: Draw all Text with Margins
+        text_margin = 5  # Margin to prevent text from touching edges or neighbors
+        
+        for item in draw_items:
+            fx, fy, fw, fh = item['frame']
+            
+            # Apply margin to the text frame
+            if fw > (2 * text_margin) and fh > (2 * text_margin):
+                fx += text_margin
+                fy += text_margin
+                fw -= (2 * text_margin)
+                fh -= (2 * text_margin)
+            
+            text_frame = Frame(fx, fy, fw, fh, showBoundary=0,
+                               leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+            kif = KeepInFrame(fw, fh, [item['para']], mode='shrink') 
             text_frame.addFromList([kif], c)
         
         if i < len(images) - 1:

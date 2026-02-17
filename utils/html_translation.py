@@ -9,15 +9,22 @@ from PIL import Image
 from tqdm import tqdm
 from doclayout_yolo import YOLOv10
 from pdf2image import convert_from_path
-from unsloth import FastLanguageModel
 import nltk
 from ollama import chat
 from weasyprint import HTML, CSS
 
+try:
+    from utils.lang_config import LangConfig
+except:
+    try:
+        from lang_config import LangConfig
+    except:
+        from .lang_config import LangConfig
+
 # Import existing utils
 # Assuming utils/text_translation.py is in the same directory or python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from text_translation import layout_detect, image_to_text
+from text_translation import layout_detect, image_to_text, clean_latex_math
 
 def sort_layout_boxes(boxes, classes, page_width, page_height):
     """
@@ -308,24 +315,25 @@ def html_to_pdf(html_path, output_path):
         print(f"Failed to generate PDF automatically with WeasyPrint: {e}")
         return False
 
-def run_html_translation(layout_ckpt, llm_ckpt, pdf_path, output_html_path, output_pdf_path, font_path, ollama_mode=True):
+def run_html_translation(
+                        layout_ckpt, pdf_path,
+                        source_lang, target_lang,
+                        output_html_path, output_pdf_path, font_path):
     # 1. Load Models
     print("Loading Layout Model...")
     layout_model = YOLOv10(layout_ckpt)
-    
-    ts_model, tokenizer = None, None
-    if not ollama_mode:
-        print("Loading Translation Model...")
-        ts_model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=llm_ckpt,
-            max_seq_length=2048,
-            load_in_4bit=True
-        )
 
     # 2. Convert PDF to Images
     print("Converting PDF...")
     images = convert_from_path(pdf_path, dpi=200)
     
+    lang_config = LangConfig()
+    source_lang = lang_config.get_ko_to_en(source_lang)
+    target_lang = lang_config.get_ko_to_en(target_lang)
+
+    source_lang_code = lang_config.get_lang_code(source_lang)
+    target_lang_code = lang_config.get_lang_code(target_lang)
+
     content_list = []
     
     # 3. Process each page
@@ -383,29 +391,34 @@ def run_html_translation(layout_ckpt, llm_ckpt, pdf_path, output_html_path, outp
                 
                 raw_text = ' '.join(text_segments)
                 
+                # Pre-process LaTeX math to Unicode
+                raw_text = clean_latex_math(raw_text)
+                
                 # Translate
                 translated_text = ""
-                if not ollama_mode:
-                    # Not implemented fully here, assumes ollama mainly based on user context
-                    pass 
-                else:
-                    if cls_id in [6, 8]: # Should be image, but if fell through
-                        continue
-                        
-                    prompt = f"""
-                    You are a technical translator. Translate this text to Korean naturally.
-                    Preserve numbers, bullet points, and formatting.
-                    Input: {raw_text}
-                    """
-                    try:
-                        resp = chat(
-                                    model='translategemma:12b', 
-                                    messages=[{'role':'user', 'content': prompt}],
-                                    options={'repeat_penalty': 1.5, 'top_p':0.9})
-                        translated_text = resp.message.content.replace("*", "")
-                    except Exception as e:
-                        print(f"Trans Error: {e}")
-                        translated_text = raw_text
+
+                if cls_id in [6, 8]: # Should be image, but if fell through
+                    continue
+                    
+                prompt = f"""
+                You are a professional {source_lang} ({source_lang_code}) to {target_lang} ({target_lang_code}) translator. 
+                Your goal is to accurately convey the meaning and nuances of the original {source_lang} text while 
+                adhering to {target_lang} grammar, vocabulary, and cultural sensitivities.
+                Produce only the {target_lang} translation, without any additional explanations or commentary. 
+                Please translate the following {source_lang} text into {target_lang}:
+                
+                Input Text:
+                {raw_text}
+                """
+                try:
+                    resp = chat(
+                                model='translategemma:12b', 
+                                messages=[{'role':'user', 'content': prompt}],
+                                options={'repeat_penalty': 1.5, 'top_p':0.9})
+                    translated_text = resp.message.content.replace("*", "")
+                except Exception as e:
+                    print(f"Trans Error: {e}")
+                    translated_text = raw_text
                 
                 # Determine Tag
                 tag = 'p'
@@ -431,10 +444,11 @@ def run_html_translation(layout_ckpt, llm_ckpt, pdf_path, output_html_path, outp
 if __name__ == "__main__":
     # Settings
     layout_ckpt = '/workspace/paper_translation/doclayout_yolo_weight/doclayout_yolo_doclaynet_imgsz1120_docsynth_pretrain.pt'
-    llm_ckpt = '/workspace/paper_translation/save_model/checkpoint-34951'
     pdf_path = '/workspace/paper_translation/pdf/en/ACE-Step_1.5_Pushing_the_Boundaries_of_Open-Source_Music.pdf'
     output_html = '/workspace/paper_translation/pdf/ko/ACE-Step_1.5_Pushing_the_Boundaries_of_Open-Source_Music.html'
     output_pdf = '/workspace/paper_translation/pdf/ko/ACE-Step_1.5_Pushing_the_Boundaries_of_Open-Source_Music.pdf'
     nanum_font_path = '/workspace/paper_translation/font/NanumGothicBold.ttf'
-    
-    run_html_translation(layout_ckpt, llm_ckpt, pdf_path, output_html, output_pdf, nanum_font_path, ollama_mode=True)
+    source_lang = "영어"
+    target_lang = "한국어"
+
+    run_html_translation(layout_ckpt, pdf_path, source_lang, target_lang, output_html, output_pdf, nanum_font_path)
